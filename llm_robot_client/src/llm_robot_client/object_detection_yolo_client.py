@@ -17,6 +17,9 @@ from collections import deque
 import message_filters
 import re   
 
+from OOD_utils import * 
+from llm_utils import generate_with_openai  
+
 """
 class CircularBuffer(deque):
     def __init__(self, size=0):
@@ -121,8 +124,14 @@ class ObjectDetectionClient:
         # CV Bridge
         self.bridge = CvBridge()
 
+        #TO DO: Load in Objects 
         self.object_list = ["fire extinguisher"]
-        
+
+        #TO DO: Load in OOD Objects 
+        self.ood_objects = {}
+        with open("/home/marble/LLMGuidedSeeding/prompts/custom_objects/tape.txt",'r') as f:
+            self.ood_objects['tape'] = f.read() 
+
         self.cam_frame_ids = {'right': None, 'front': None, 'left': None}
         
         self.frame_width = None
@@ -270,7 +279,7 @@ class ObjectDetectionClient:
         for frame in image_list:
             try:
                 encoded_image = self.encode_image(image_data['image'][frame])
-                cv2.imwrite("/home/marble/LLM_robot_ws/src/llm_robot_client/frame.jpg",image_data['image'][frame])
+                #cv2.imwrite("/home/marble/LLM_robot_ws/src/llm_robot_client/frame.jpg",image_data['image'][frame])
                 # Prepare the headers for the HTTP request
                 headers = {"Content-Type": "image/jpeg"}
                 rospy.loginfo("Posting request to yolo world server ...") 
@@ -294,6 +303,56 @@ class ObjectDetectionClient:
             except requests.exceptions.RequestException as e:
                 rospy.loginfo("Error querying GLIP server: {}".format(e))
             
+    def detect_OOD_objects(self, image_data, max_masks_for_consideration=10):
+        image_list = ['front', 'left', 'right']
+        rospy.loginfo("detecting objects...")
+        for frame in image_list:
+            cv2.imwrite("tmp_frame.jpg",image_data['image'][frame])
+            try:
+                for custom_obj in self.ood_objects.keys:
+                    #1. Ask ChatGPT if foo is in the frame 
+                    prompt = "The user has defined a"+custom_obj+"like this: \n" + self.ood_objects[custom_obj]
+                    response,history = generate_with_openai(prompt,image_path="tmp_frame.jpg")
+                    #2. If so, are there multiple foo 
+                    if not 'yes' in response.lower():
+                        continue 
+                    prompt = "Are there more than one " + custom_obj + " in this image?" 
+                    response,history = generate_with_openai(prompt,conversational_history=history,image_path="tmp_frame.jpg") 
+                    multi_obj = False 
+                    if 'yes' in response.lower:
+                        multi_obj = True 
+                    #3. Would foo on the ground in this image? 
+                    on_ground = is_ground_obj(custom_obj,self.ood_objects[custom_obj],image_data['image'][frame])
+                    # The following steps are to get the obj mask(s) in this frame 
+                    #4. Extract all the masks
+                    masks = get_masks() 
+                    #5. Get ground and non-ground masks 
+                    largest_ground_mask = get_largest_ground_mask(masks) 
+                    ground_masks,non_ground_masks = get_ground_masks(largest_ground_mask,masks) 
+                    if on_ground: 
+                        possible_masks = ground_masks 
+                    else:
+                        possible_masks = non_ground_masks
+                    if len(possible_masks) > max_masks_for_consideration:
+                        #Filter by color + size
+                        obj_size = get_obj_size(custom_obj,self.ood_objects[custom_obj]) 
+                        prompt = "Given this object description, is there a particular color of the object we should look for?\n" + "Object description: " + self.ood_objects[custom_obj] 
+                        response,_ = generate_with_openai(prompt) 
+                        if 'no' in response.lower():
+                            possible_masks = filter_masks(possible_masks,image_data['image'][frame],obj_size,frame) 
+                        else:
+                            colors = parse_color_response(response)
+                            obj_size = get_obj_size(custom_obj,self.ood_objects[custom_obj]) 
+                            possible_masks = filter_masks(possible_masks,image_data['image'][frame],obj_size,frame,color=colors)  
+                        if len(possible_masks) > max_masks_for_consideration: 
+                            raise OSError 
+                    custom_obj_masks = audition_masks(custom_obj,possible_masks,image_data['image'][frame],multiple_objects=multi_obj) 
+                    #6. Publish the detection given the object mask 
+                    self.process_custom_detection_results(self,image_data,custom_obj_masks,frame)
+                    #TO DO: write process_custom_detection_results 
+
+            except requests.exceptions.RequestException as e:
+                rospy.loginfo("Error detecting custom objects: {}".format(e))
 
     def process_detection_results(self, image_data, response_data, frame):
         # Publish the server is runnig if not already done
