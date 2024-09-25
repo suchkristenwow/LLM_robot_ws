@@ -10,6 +10,11 @@ if __name__ == '__main__':
 
     bot = Robot()
     
+    def shutdown_hook():
+        rospy.loginfo("Shutting down Robot node...")
+
+    rospy.on_shutdown(shutdown_hook)
+    
     while not rospy.is_shutdown():
         # Perform object detection tasks here
         bot.run()

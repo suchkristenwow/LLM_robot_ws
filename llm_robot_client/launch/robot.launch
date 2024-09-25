@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+    <!-- Spot URDF -->
+    <arg name="show_spot_urdf" default="false" />
+    <param if="$(arg show_spot_urdf)" name="robot_description" command="$(find xacro)/xacro '$(find llm_robot_client)/urdf/H03_marble_husky.urdf.xacro'" />
+
+    <!-- Transforms -->
+    <arg name="vehicle_name" default="H03" />
+    <arg name="lidar_link" default="horiz_ouster_sensor" />
+    <arg name="base_link" default="imu_viz_link" />
+    
+    <arg name="enable_bagging" default="false" />
+
+    <!-- Global Arguments -->
+    <!-- Odometry Topic -->
+    <arg name="odom_topic" default="/$(arg vehicle_name)/odometry" />
+    <!-- Path Topic -->
+    <arg name="path_topic" default="/$(arg vehicle_name)/lio_sam/mapping/path" />
+
+    <!-- START Camera Topics -->
+    <!-- Number of Camera Streams -->
+    <arg name="num_cam" default="3" />
+    <!-- Enable if Image is not already rectified -->
+    <arg name="rectify_point" default="false" />
+    <!-- Camera Topics -->
+    <arg name="cam_front_info" default="/$(arg vehicle_name)/cam_front/camera_info" />
+    <arg name="cam_left_info" default="/$(arg vehicle_name)/cam_left/camera_info" />
+    <arg name="cam_right_info" default="/$(arg vehicle_name)/cam_right/camera_info" />
+    <!-- Subscribe to Compressed Images -->
+    <arg name="cam_front_topic" default="/$(arg vehicle_name)/cam_front/image_rect_color/compressed" />
+    <arg name="cam_left_topic" default="/$(arg vehicle_name)/cam_left/image_rect_color/compressed" />
+    <arg name="cam_right_topic" default="/$(arg vehicle_name)/cam_right/image_rect_color/compressed" />
+    <!-- Threshold for Cropping Concatanted Images -->
+    <arg name="crop_threshold" default="15" />
+    <!-- Publish Concated Images (For Debug or Recording) -->
+    <arg name="publish_concate_image" default="true" />
+    <!-- Publish Detections Images (For Debug or Recording) -->
+    <arg name="publish_detections_image" default="true" />
+    <!-- END Camera Topics -->
+
+    <!-- Map Topic -->
+    <arg name="octomap_topic" default="merged_map" />
+    <!-- Object Detector Name -->
+    <arg name="detector_name" default="yolo" /> <!-- yolo, or glip -->
+    <!-- Raw Objects from Detector -->
+    <arg name="object_detection_2D_topic" default="object_detector/raw_detections" />
+    <!-- Recieve Updated List Of Object Labels On This Topic -->
+    <arg name="object_list_topic" default="object_detector/object_list_llm" />  
+    <!-- Recieve Updated List Of Object Labels On This Topic -->
+    <arg name="out_of_distribution_objects" default="ood_object_detector/object_list_llm" /> 
+
+    <!-- Object Detection Server URL (External URL For GLIP) -->
+    <!-- arg name="object_detection_server_url" default="http://172.206.254.216:5000" /-->
+    <arg name="object_detection_server_url"  default="http://100.109.99.3:5005"/> 
+    <arg name="segment_anything_server_url" default="http://100.109.99.3:5006"/>
+    <!-- Object Detection Server Status -->
+    <arg name="object_detector_status_topic" default="object_detector/status" />
+    <!-- URL For Robot Server which Interacts with the Explore Loop -->
+    <arg name="host_url" default="http://0.0.0.0:5000" />
+    <!-- Object Projection Topic -->
+    <!-- Current Detections From Projection Node -->
+    <arg name="current_objects_topic" default="object_detector/current_objects" />
+    <!-- Filtered Projections From Median Filter -->
+    <arg name="all_objects_topic" default="object_detector/all_objects" />
+
+    <arg name="global_graph_points_topic" default="gbplanner_node/global_graph_points" />
+    <arg name="local_graph_points_topic" default="gbplanner_node/local_graph_points" />
+    <arg name="frontier_points_topic" default="gbplanner_node/frontier_points" />
+    <!-- L3 Norm threshold -->
+    <arg name="eps_dbscan" default="0.2" />
+    <arg name="min_samples" default="2" />
+    <arg name="filtered_graph_points_viz_topic" default= "filtered_graph_points_viz" />
+    <arg name="enable_filtered_graph_points_viz" default="true" />
+
+    <arg name="planning_mode_topic" default="/$(arg vehicle_name)/scan_plan_node/status_out" />
+    <!-- Can the planner plan. Planner has two statuses one about the mode (above) and can plan -->
+    <!-- arg name="waypoint_plan_status_topic" default="waypoint_status" / -->
+    <!-- Velocity Topic For Robot -->
+    <arg name="cmd_vel_topic" default="/$(arg vehicle_name)/path_follower/cmd_vel"/>
+
+    <!--Traget Object-->
+    <!-- arg name="target_object_name" default="Fire Extinguisher"/ -->
+
+    <!-- Medain Filter -->
+    <arg name="median_filter_rate" default="5" />
+    <arg name="distance_threshold" default="0.5" />
+
+    <arg name="bagging_filepath" default="$(env HOME)/ros_logs"/>
+    <arg name="split_size" default="1024"/>
+    <!-- size in MB -->
+
+    <!--Waypoint Threshold-->
+    <arg name="waypoint_threshold" default="0.5" />
+    <arg name="enable_naive_exploration" default="false" />
+
+    <arg name="config_path" default="/home/marble/LLMGuidedSeeding/configs/example_config.toml"/> 
+    <arg name="ground_plane_topic" default="$(arg vehicle_name)/ground_plane_points"/> 
+    <arg name="robot_pose_topic" default="$(arg vehicle_name)/odometry"/>
+
+    <node pkg="rosbag" type="record" if="$(arg enable_bagging)" name="$(arg vehicle_name)_llm_guided_bag" args="--split --size=$(arg split_size) -o $(arg bagging_filepath)/$(arg vehicle_name)_llm_guided_bag
+        /$(arg vehicle_name)/$(arg frontier_points_topic)
+        /$(arg vehicle_name)/$(arg cam_front_topic)
+        /$(arg vehicle_name)/$(arg cam_left_topic)
+        /$(arg vehicle_name)/$(arg cam_right_topic)
+        /$(arg vehicle_name)/$(arg octomap_topic)
+        /$(arg vehicle_name)/$(arg object_detection_2D_topic)
+        /$(arg vehicle_name)/$(arg object_list_topic)
+        /$(arg vehicle_name)/$(arg current_objects_topic)
+        /$(arg vehicle_name)/$(arg all_objects_topic)
+        /$(arg vehicle_name)/object_detector/debug_rviz
+        /$(arg vehicle_name)/$(arg odom_topic)
+        /$(arg vehicle_name)/$(arg path_topic)
+        /$(arg vehicle_name)/guiGoalPoint/viz
+        /$(arg vehicle_name)/guiGoalPoint
+        /$(arg vehicle_name)/object_detector/detection/image/compressed
+        /$(arg vehicle_name)/gbplanner/go_to_waypoint_pose_visualization 
+        /$(arg vehicle_name)/gbplanner_node/global_graph_points 
+        /$(arg vehicle_name)/gbplanner_node/local_graph_points 
+        /$(arg vehicle_name)/gbplanner_status 
+        /$(arg vehicle_name)/global_planner/waypoint_request
+        /$(arg vehicle_name)/gbplanner_node/occupied_nodes
+        /$(arg vehicle_name)/vis/planning_global_path
+        /$(arg vehicle_name)/vis/planning_global_graph
+        /$(arg vehicle_name)/gbplanner_node/mesh
+        /tf
+        /tf_static">
+        <param name="mkdir_temp" command="mkdir -m 777 -p $(arg bagging_filepath)"/>
+    </node>
+
+    <group ns="$(arg vehicle_name)">
+        <!--LocalizeArtifacts-->
+        <node pkg="llm_robot_client" type="project_detections_node" name="project_detections" output="log">
+            <param name="num_cam" value="$(arg num_cam)" />
+            <param name="cam0_info" value="$(arg cam_front_info)" />
+            <param name="cam1_info" value="$(arg cam_left_info)" />
+            <param name="cam2_info" value="$(arg cam_right_info)" />
+            <param name="cam3_info" value="$(arg cam_left_info)" />
+            <param name="octomap_topic" value="$(arg octomap_topic)" />
+            <param name="lidar_link" value="$(arg lidar_link)" />
+            <param name="object_detection_2D_topic" value="$(arg object_detection_2D_topic)" />
+            <param name="current_objects_topic" value="$(arg current_objects_topic)" />
+        </node>
+
+        <!-- Object Detection Client outputs 2D Detections -->
+        <node pkg="llm_robot_client" type="object_detection_client_node.py" name="object_detection_client" output="screen">
+            <param name="object_detection_server_url" value="$(arg object_detection_server_url)" />
+            <param name="segment_anything_server_url" value="$(arg segment_anything_server_url)"/>
+            <param name="cam_front_topic" value="$(arg cam_front_topic)" />
+            <param name="cam_left_topic" value="$(arg cam_left_topic)" />
+            <param name="cam_right_topic" value="$(arg cam_right_topic)" />
+            <param name="robot_id" value="$(arg vehicle_name)" />
+            <param name="object_list_topic" value="$(arg object_list_topic)" />
+            <param name="crop_threshold" value="$(arg crop_threshold)" />
+            <param name="publish_concate_image" value="$(arg publish_concate_image)" />
+            <param name="publish_detections_image" value="$(arg publish_detections_image)" />
+            <param name="object_detection_2D_topic" value="$(arg object_detection_2D_topic)" />
+            <param name="object_detector_status_topic" value="$(arg object_detector_status_topic)" />
+            <param name="detector_name" value="$(arg detector_name)" />
+            <!--LLM Guided Seeding Stuff-->
+            <param name="config_path" value="$(arg config_path)"/>
+            <param name="ground_plane_topic" value="$(arg ground_plane_topic)"/>
+            <param name="robot_pose_topic" value="$(arg robot_pose_topic)"/>
+        </node>
+
+        <!-- Main Cog Explore Client Controls Exploration Behavior -->
+        <node pkg="llm_robot_client" type="robot_node.py" name="robot" output="screen">
+            <param name="object_list_topic" value="$(arg object_list_topic)" />
+            <param name="current_objects_topic" value="$(arg current_objects_topic)" />
+            <param name="odom_topic" value="$(arg odom_topic)" />
+            <param name="path_topic" value="$(arg path_topic)" />
+            <param name="frontier_points_topic" value="$(arg frontier_points_topic)" />
+            <param name="all_objects_topic" value="$(arg all_objects_topic)" />
+            <param name="current_objects_topic" value="$(arg current_objects_topic)" />
+            <param name="host_url" value="$(arg host_url)" />
+            <param name="cam_front_topic" value="$(arg cam_front_topic)" />
+            <param name="cam_left_topic" value="$(arg cam_left_topic)" />
+            <param name="cam_right_topic" value="$(arg cam_right_topic)" />
+            <param name="object_detector_status_topic" value="$(arg object_detector_status_topic)" />
+            <param name="waypoint_threshold" value="$(arg waypoint_threshold)" />
+            <param name="planning_mode_topic" value="$(arg planning_mode_topic)" />
+            <param name="eps_dbscan" value="$(arg eps_dbscan)" />
+            <param name="min_samples" value="$(arg min_samples)" />
+            <param name="filtered_graph_points_viz_topic" value="$(arg filtered_graph_points_viz_topic)" />
+            <param name="enable_filtered_graph_points_viz" value="$(arg enable_filtered_graph_points_viz )" />
+            <param name="global_graph_points_topic" value="$(arg global_graph_points_topic)" />
+            <param name="local_graph_points_topic" value="$(arg local_graph_points_topic)" />
+            <param name="enable_naive_exploration" value="$(arg enable_naive_exploration)" />
+            <!-- param name="target_object_name" value="$(arg target_object_name)" / -->
+        </node>
+
+        <node pkg="llm_robot_client" type="object_median_filter_node.py" name="object_median_filter" output="screen">
+            <param name="all_objects_topic" value="$(arg all_objects_topic)" />
+            <param name="current_objects_topic" value="$(arg current_objects_topic)" />
+            <param name="median_filter_rate" value="$(arg median_filter_rate)" />
+            <param name="vehicle_name" value="$(arg vehicle_name)" />
+            <param name="all_objects_topic" value="$(arg all_objects_topic)" />
+            <param name="current_objects_topic" value="$(arg current_objects_topic)" />
+            <param name="distance_threshold" value="$(arg distance_threshold)" />
+        </node>
+    </group>
+    <!-- <node pkg="rostopic" type="rostopic" name="scan_task_pub" output="screen" args="pub -r 5 $(arg vehicle_name)/task std_msgs/String 'data: guiCMD'" /> -->
+</launch>

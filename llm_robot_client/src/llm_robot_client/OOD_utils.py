@@ -8,6 +8,22 @@ from shapely.geometry import Polygon
 import sensor_msgs.point_cloud2 as pc2 
 from geometry_msgs.msg import Point 
 from llm_utils import generate_with_openai 
+from sensor_msgs.msg import CompressedImage 
+from std_msgs.msg import Header 
+
+def extract_colors(text):
+    # List of known color names (this is a small sample, you can expand it with more colors)
+    color_names = ["red", "green", "blue", "yellow", "orange", "purple", "pink", "black", "white", 
+                "brown", "gray", "cyan", "magenta", "gold", "silver", "beige", "violet", 'indigo', "grey",
+                "lavender", 'maroon', 'navy']
+
+    # Convert text to lowercase and split it into words
+    words = re.findall(r'\b\w+\b', text.lower())  # Extract words, ignoring punctuation
+    
+    # Find words that are in the color_names list
+    found_colors = [word for word in words if word in color_names]
+    
+    return found_colors 
 
 def contour_points_from_mask(binary_mask):
     """
@@ -174,33 +190,26 @@ def inverse_projection(pts,frame):
 
     return px_coords
 
-def annotate_image(mask,image):
-    """
-    Draw the image with the mask on top 
-    """
-    m = mask['segmentation']
-    color_mask = np.concatenate([255,0,0],[0.35])
-    image[m] = color_mask 
-    return image 
-
 def get_ground_masks(ground_mask,all_masks): 
     """
     Return ground_masks,non_ground_masks 
     That is, the masks that are in contact with the ground mask or not 
     """
-    results = []
-    
+
+    ground_masks = []
+    non_ground_masks =[]
     for obj_mask in all_masks:
         # Perform element-wise AND between ground_mask and obj_mask
         intersection = np.logical_and(ground_mask, obj_mask['segmentation'])
         
         # Check if any pixel in the intersection is non-zero
-        if np.any(intersection):
-            results.append(True)
+        if np.any(intersection): 
+            #TO DO: check that its not the ground mask itself 
+            ground_masks.append(obj_mask)
         else:
-            results.append(False)
+            non_ground_masks.append(obj_mask)
     
-    return results
+    return ground_mask,non_ground_masks 
 
 def get_bounding_box_from_mask(binary_mask):
     # Find the non-zero points (object points)
@@ -235,7 +244,11 @@ def filter_masks_by_color(masks,image_data,obj_color):
         # Draw the bounding box on the image
         img_with_box = cv2.rectangle(image_data, (x_min, y_min), (x_max, y_max), (0,255,0), thickness=2)
         cv2.imwrite("img_with_box.jpg",img_with_box) 
-        prompt = "Is the object within this bounding box " + obj_color + "?"
+        if len(obj_color) == 1:
+            prompt = "Is the object within this bounding box " + obj_color + "?"
+        else:
+            prompt = "Is the object within this bounding box any of the following colors: " + obj_color + "?"
+
         response,_ = generate_with_openai(prompt,image_path="img_with_box.jpg") 
         if 'yes' in response.lower():
             correct_color_masks.append(mask) 
@@ -491,4 +504,38 @@ def pick_largest_k_masks(masks, k):
     # Select the top k largest masks
     largest_k_masks = [mask for mask, _ in mask_area_list[:k]]
 
-    return largest_k_masks
+    return largest_k_masks 
+
+def filter_bottom_masks(masks): 
+    filtered_masks = []
+
+    for mask in masks:
+        # Get the height of the mask
+        height = mask.shape[0]
+
+        # Calculate the cutoff for the top 1/8th of the image
+        top_region = height // 8
+
+        # Check if any pixel in the top 1/8th is non-zero
+        if not np.any(mask[:top_region, :]):
+            # If no pixels are non-zero in the top 1/8th, keep the mask
+            filtered_masks.append(mask)
+
+    return filtered_masks
+ 
+def get_ground_plane_z(ground_plane_msg):
+    ground_plane_pc = pointcloud2_msg_to_array(ground_plane_msg) 
+    return np.median(ground_plane_pc[:,2]) #is this actually z? 
+
+def sample_ground_pts(z_val,px_coords,n=3): 
+    px_coords = np.array([pt for pt in px_coords if z_val - 0.05 <= pt[2] <= z_val + 0.05]) 
+    # Ensure that n does not exceed the number of available pixel coordinates
+    n = min(n, len(px_coords))
+    
+    # Randomly choose 'n' indices without replacement
+    random_indices = np.random.choice(len(px_coords), size=n, replace=False)
+    
+    # Select the coordinates at the random indices
+    random_coords = px_coords[random_indices]
+    
+    return random_coords

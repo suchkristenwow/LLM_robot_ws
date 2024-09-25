@@ -1,0 +1,9 @@
+# Request
+float64 x
+float64 y
+float64 z
+string cam_frame
+---
+# Response
+float64 u  # Pixel x-coordinate
+float64 v  # Pixel y-coordinate

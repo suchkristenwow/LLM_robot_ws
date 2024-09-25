@@ -1,0 +1,10 @@
+# ProjectBackOfBbox.srv
+# Request
+float64 u  # Pixel x-coordinate
+float64 v  # Pixel y-coordinate
+string cam_frame  # Camera frame (e.g., "left", "right", or "front")
+
+---
+# Response
+geometry_msgs/Point[] front_corners  # 3D points for the front corners of the bounding box
+geometry_msgs/Point[] back_corners   # 3D points for the back corners of the bounding box

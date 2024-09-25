@@ -1,0 +1,7 @@
+# Request
+float64 u  # Pixel x-coordinate
+float64 v  # Pixel y-coordinate
+string cam_frame  # Camera (left, right, front)
+---
+# Response
+geometry_msgs/Point world_point  # 3D point in the world frame

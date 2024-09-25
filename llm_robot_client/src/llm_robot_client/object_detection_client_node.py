@@ -10,6 +10,11 @@ if __name__ == '__main__':
     detector_name = rospy.get_param('detector_name', "yolo")
     od_client = YOLOObjectDetectionClient()
 
+    def shutdown_hook():
+        rospy.loginfo("Shutting down Object Detection Client node...")
+
+    rospy.on_shutdown(shutdown_hook)
+    
     #rospy.spin()
     while not rospy.is_shutdown():
         # Perform object detection tasks here

@@ -236,14 +236,14 @@ class Robot:
         self.is_ready_sub = rospy.Subscriber(
             is_ready_topic, Bool, self.is_ready_callback, queue_size=1
         )
-        rospy.loginfo("[cog_explore_robot] Subscribed to Ready: %s", is_ready_topic)
+        rospy.loginfo("[llm_robot] Subscribed to Ready: %s", is_ready_topic)
 
         # Odom Functions
         odom_topic = rospy.get_param("~odom_topic", "odom")
         self.odom_sub = rospy.Subscriber(
             odom_topic, Odometry, self.odom_callback, queue_size=1
         )
-        rospy.loginfo("[cog_explore_robot] Subscribed to Odom: %s", odom_topic)
+        rospy.loginfo("[llm_robot] Subscribed to Odom: %s", odom_topic)
 
         self.current_odom = None
 
@@ -252,7 +252,7 @@ class Robot:
         self.path_sub = rospy.Subscriber(
             path_topic, Path, self.path_callback, queue_size=1
         )
-        rospy.loginfo("[cog_explore_robot] Subscribed to Path: %s", path_topic)
+        rospy.loginfo("[llm_robot] Subscribed to Path: %s", path_topic)
 
         # Frontier Points (Local)
         local_graph_points_topic = rospy.get_param(
@@ -265,7 +265,7 @@ class Robot:
             queue_size=1,
         )
         rospy.loginfo(
-            "[cog_explore_robot] Subscribed to Local Graph Points: %s",
+            "[llm_robot] Subscribed to Local Graph Points: %s",
             local_graph_points_topic,
         )
 
@@ -280,7 +280,7 @@ class Robot:
             queue_size=1,
         )
         rospy.loginfo(
-            "[cog_explore_robot] Subscribed to Global Graph Points: %s",
+            "[llm_robot] Subscribed to Global Graph Points: %s",
             global_graph_points_topic,
         )
 
@@ -303,7 +303,7 @@ class Robot:
             queue_size=1,
         )
         rospy.loginfo(
-            "[cog_explore_robot] Subscribed to Projected Objects: %s",
+            "[llm_robot] Subscribed to Projected Objects: %s",
             all_objects_topic,
         )
 
@@ -318,7 +318,7 @@ class Robot:
             queue_size=1,
         )
         rospy.loginfo(
-            "[cog_explore_robot] Subscribed to Current Object Detections: %s",
+            "[llm_robot] Subscribed to Current Object Detections: %s",
             current_object_detections_topic,
         )
 
@@ -360,7 +360,7 @@ class Robot:
             "~waypoint_plan_status_topic", "/waypoint_plan_status"
         )
         rospy.loginfo(
-            "[cog_explore_robot] Subscribed to waypoint plan status topic: %s",
+            "[llm_robot] Subscribed to waypoint plan status topic: %s",
             self.waypoint_plan_status_topic,
         )
         '''
@@ -387,7 +387,7 @@ class Robot:
 
         waypoint_marker_topic = self.waypoint_plan_status_topic + "/viz"
         rospy.loginfo(
-            "[cog_explore_robot] waypoint marker topic: %s", waypoint_marker_topic
+            "[llm_robot] waypoint marker topic: %s", waypoint_marker_topic
         )
         self.waypoint_marker_pub = rospy.Publisher(
             waypoint_marker_topic, Marker, queue_size=1
@@ -810,7 +810,7 @@ class Robot:
         print(len(all_points))
         # Convert all_points to NumPy array for clustering
         points_array = np.array(all_points)
-        # roslaunch llm_robot_client cog_explore_robot.launch object_detection_server_url:=http://0.0.0.0:5005 host_url:=http://0.0.0.0:5000 eps_dbscan:=5.0 min_samples:=5 median_filter_rate:=2 distance_threshold:=0.5 waypoint_threshold:=0.35 enable_bagging:=True
+        # roslaunch llm_robot_client llm_robot.launch object_detection_server_url:=http://0.0.0.0:5005 host_url:=http://0.0.0.0:5000 eps_dbscan:=5.0 min_samples:=5 median_filter_rate:=2 distance_threshold:=0.5 waypoint_threshold:=0.35 enable_bagging:=True
         # Perform DBSCAN clustering
         print("Clustering with values eps: ", self.eps_dbscan, " min_samples: ", self.min_samples)
         dbscan = DBSCAN(
