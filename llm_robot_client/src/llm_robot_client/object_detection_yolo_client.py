@@ -176,7 +176,7 @@ class ObjectDetectionClient:
 
         self.detected_image_publisher = rospy.Publisher(
             "object_detector/detection/image/compressed",
-            CompressedImage,
+            Image,
             latch=True,
             queue_size=10,
         )
@@ -225,6 +225,10 @@ class ObjectDetectionClient:
         self.cam_frame_ids = {'right': None, 'front': None, 'left': None}
         
         self.frame_width = None
+
+        self.largest_ground_mask = {} 
+
+        self.init_ground_mask_thread() 
         
         self.init_detection_thread()
 
@@ -378,7 +382,74 @@ class ObjectDetectionClient:
             cv2.imwrite(path, image)
 
         return msg
-        
+    
+    def find_largest_ground_mask(self, image_data, frame):
+        """
+        Finds the largest ground mask for the given frame.
+        """
+        encoded_image = process_image(image_data['image'][frame])
+        request = {
+            'action': 'get_ground_mask',
+            'frame': frame,
+            'time': time.time(),
+            'image': encoded_image
+        }
+
+        rospy.loginfo("Posting request to segment anything server for ground mask...")
+        t0 = time.time()
+        response = requests.post(self.segment_anything_server_url + "/get_ground_mask", json=request)
+        rospy.loginfo("Received response from segment anything server in {} seconds.".format(np.round(time.time() - t0, 2)))
+
+        if response.status_code != 200:
+            rospy.logwarn("Failed to get ground mask: {}".format(response.text))
+            return None
+
+        # Get the JSON data from the response
+        response_data = response.json()
+        shape = response_data['img_shape']
+
+        # Extract mask data and reshape the masks to match the image size
+        h, w, c = image_data['image'][frame].shape
+        #masks = [np.reshape(np.array(mask), (h, w)) for mask in response_data['masks']]
+        arr_masks = [np.array(x) for x in response_data['masks']]
+        masks = [mask.reshape(shape) for mask in arr_masks] 
+
+        max_area = 0
+        largest_mask = None
+        for mask in masks:
+            area = np.sum(mask)
+            if area > max_area:
+                largest_mask = mask
+                max_area = area
+
+        return largest_mask
+
+    def run_largest_ground_mask_thread(self):
+        """
+        This will run in a separate thread.
+        """
+        image_list = ['front', 'left', 'right']
+        while not rospy.is_shutdown():
+            for frame in image_list:
+                rospy.loginfo("Finding ground mask for frame: {}".format(frame))
+                if len(self.image_queue) > 0 and len(self.ood_objects) > 0:
+                    # Get the image data from the queue
+                    image_data = copy.deepcopy(self.image_queue.pop()) 
+                    
+                    # Acquire the lock to safely update self.largest_ground_mask
+                    with self.ground_mask_lock:
+                        self.largest_ground_mask[frame] = self.find_largest_ground_mask(image_data, frame)
+                        rospy.loginfo("Updated largest ground mask for frame: " + frame)
+                    
+                rospy.sleep(0.1)  # Sleep to avoid overloading the loop
+
+
+    def init_ground_mask_thread(self):
+        self.ground_mask_lock = threading.Lock()
+        self.largest_ground_mask = {}  # Dictionary to store the largest ground mask for each frame
+        self.ground_mask_thread = threading.Thread(target=self.run_largest_ground_mask_thread)
+        self.ground_mask_thread.start()
+
     def init_detection_thread(self):
         self.detection_lock = threading.Lock()
         self.detection_thread = threading.Thread(target=self.run_detection_thread)
@@ -391,7 +462,6 @@ class ObjectDetectionClient:
             
             try: 
                 if acquired:  # Proceed only if the lock was acquired 
-                    print("getting len(self.image_queue)...")
                     if len(self.image_queue) > 0 and self.object_list is not None:
                         image_data = copy.deepcopy(self.image_queue.pop())
                         self.detect_objects(image_data)
@@ -592,50 +662,6 @@ class ObjectDetectionClient:
         rospy.loginfo("Debug inverse projection image publishing ...")
         self.debug_inverse_projection.publish(annotated_image_msg)
 
-    def segment_ground_mask(self,image,frame,max_masks_for_consideration):
-        rospy.loginfo("Segmenting ground mask ....")
-        #5. Get ground and non-ground masks 
-        """
-        ground_plane_z = get_ground_plane_z(self.current_ground_plane_msg) 
-
-        pts_inside_frustrum = get_ground_plane_pts(ground_plane_z,self.robot_tfs,self.current_odom_msg,self.current_ground_plane_msg,frame) 
-
-        ### DEBUG ### 
-        header = Header()
-        header.stamp = rospy.Time.now()
-        header.frame_id = "H03/base_link"  # Set the appropriate frame
-
-        # Create the PointCloud2 message
-        debug_msg = pc2.create_cloud_xyz32(header, pts_inside_frustrum)
-
-        self.debug_frustrum_pts_publisher.publish(debug_msg) 
-        ### END DEBUG ### 
-
-        ground_plane_px_coords = inverse_projection(image.shape,pts_inside_frustrum,frame) 
-
-        print("Got ground plane px coords!")
-        grounded_px_coords = sample_ground_pts(ground_plane_px_coords)
-        if len(grounded_px_coords) == 0:
-            raise OSError 
-        
-        self.publish_annotated_image(image,grounded_px_coords) 
-        """ 
-        #Get the ground mask 
-        encoded_image = process_image(image) 
-        request = {
-            'action': 'generate_masks',
-            'image': encoded_image 
-        }
-
-        
-        t0 = time.time() 
-        rospy.loginfo("Calling Segment Anything server ... calling generate masks: {}".format(t0)) #1728340876.82 
-        response_data = requests.post(self.segment_anything_server_url + "/generate_masks",json=request)
-        response = response_data.json() 
-        print("received response from segment anything server. That took {} secs".format(np.round(time.time()-t0,2)))
-
-        all_masks = response['masks']; all_masks = [np.array(x) for x in all_masks] 
-
     def detect_OOD_objects(self, image_data, max_masks_for_consideration=5):
         image_list = ['front', 'left', 'right']
         rospy.loginfo("detecting OOD objects...")
@@ -671,63 +697,18 @@ class ObjectDetectionClient:
                     #on_ground = is_ground_obj(custom_obj,self.ood_objects[custom_obj],'/home/marble/tmp_frame.jpg') 
                     on_ground = True 
 
-                    encoded_image = process_image(image_data['image'][frame])
-                    request = {
-                        'action': 'get_ground_mask',
-                        'frame':frame, 
-                        'time':time.time(),
-                        'image': encoded_image 
-                    }
-
-                    try:
-                        print("Trying to get possible ground masks!")
-                        t0 = time.time() 
-                        # Make the request to the Segment Anything server
-                        rospy.loginfo("Posting request to segment anything server: {}".format('get_ground_mask'))
-                        response = requests.post(self.segment_anything_server_url + "/get_ground_mask", json=request)
-                        print("recieved response from segment anything server ... that took {} secs".format(np.round(time.time() - t0,2)))
-                        # Check for a successful response
-                        if response.status_code != 200:
-                            rospy.logwarn("Failed to get ground mask: {}".format(response.text))
-                            return None, []
-
-                        # Get the JSON data from the response
-                        response_data = response.json()
-
-                        # Extract mask and contour points from the JSON response
+                    while frame not in self.largest_ground_mask.keys():
+                        rospy.sleep(0.1)
+                        print("waiting for ground mask ...")
                         
-                        h,w,c = image_data['image'][frame].shape 
-                        masks = []
-                        for list_mask in response_data['masks']:
-                            new_mask = np.array(list_mask); new_mask = np.reshape(new_mask,(h,w))
-                            masks.append(new_mask) 
-
-                        #(obj_type, masks, image, img_time, frame,
-                        timestamp = datetime.now()
-
-                        # Convert to human-readable format
-                        human_readable =  timestamp.strftime("%Y-%m-%d_%H-%M-%S") 
-
-                        #largest_ground_mask = audition_masks('ground',masks,image_data['image'][frame],human_readable,frame)  
-                        largest_ground_mask = None 
-                        max_area = 0
-                        for mask in masks:
-                            if np.sum(mask) > max_area:
-                                largest_ground_mask = mask 
-                                max_area = np.sum(mask) 
-
-                    except requests.exceptions.RequestException as e:
-                        rospy.logerr("Error querying the segment anything server: {}".format(e))
-
-
-                    ground_bb = get_bounding_box_from_mask(largest_ground_mask) 
+                    ground_bb = get_bounding_box_from_mask(self.largest_ground_mask[frame]) 
 
                     frame_copy = copy.deepcopy(image_data['image'][frame])
                     timestamp = datetime.now()
 
                     # Convert to human-readable format
                     human_readable =  timestamp.strftime("%Y-%m-%d_%H-%M-%S") 
-                    self.crop_image_to_bounding_box(largest_ground_mask, frame_copy, "/home/marble/debug_imgs/" + frame +"_cropped_ground_bounding_box_"+human_readable+".jpg")
+                    self.crop_image_to_bounding_box(self.largest_ground_mask[frame], frame_copy, "/home/marble/debug_imgs/" + frame +"_cropped_ground_bounding_box_"+human_readable+".jpg")
                     cropped_img = cv2.imread("/home/marble/debug_imgs/" + frame +"_cropped_ground_bounding_box_"+human_readable+".jpg") 
 
                     #self.draw_boundingBox_image(largest_ground_mask, image_data['image'][frame], 'bgr8', "/home/marble/ground_bounding_box.jpg") 
