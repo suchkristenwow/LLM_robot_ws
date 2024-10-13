@@ -5,7 +5,7 @@ This node localizes Detections of an object in camera space by projecting from c
 #include <llm_robot_client/project_detections.h>
 
 int main(int argc, char** argv){
-    if( ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Debug)){
+    if( ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info)){
         ros::console::notifyLoggerLevelsChanged();
         }
     ROS_INFO("[Project Detections] Initializing Node.");
@@ -21,7 +21,6 @@ int main(int argc, char** argv){
     ProjectDetections localizer(nh, nh_private, tf_buffer, &tf_listener) ;
     localizer.initialize_params();
 
-
     while(ros::ok()){
         localizer.run();
         //ROS_DEBUG("Spinning");
@@ -29,6 +28,5 @@ int main(int argc, char** argv){
         loop_rate.sleep();
     }
     ROS_INFO("[Project Detections] Done.");
-
 
 }

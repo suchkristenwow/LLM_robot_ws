@@ -79,12 +79,15 @@ void ProjectDetections::initialize_subscribers()
     int num_cam;
     _nh_private.param("num_cam", num_cam, 1);
 
+    // ROS_WARN("[Project Detections] Initializing subscribers ... This is the number of cameras: %d", num_cam); 
+
     for (int i = 0; i < num_cam; i++)
     {
         std::string cam_info_topic;
+        // ROS_WARN("[Project Detections] Trying to subscribe to: %s", "cam" + std::to_string(i) + "_info");
         if (_nh_private.getParam("cam" + std::to_string(i) + "_info", cam_info_topic))
         {
-            ROS_DEBUG("[Project Detections:] Subscribing to %s topic", cam_info_topic.c_str());
+            // ROS_WARN("[Project Detections] Subscribing to %s topic", cam_info_topic.c_str());
             ros::Subscriber current_sub = _nh.subscribe(cam_info_topic, 10, &ProjectDetections::cam_info_callback, this);
             _cam_info_sub_array.push_back(current_sub);
         }
@@ -102,6 +105,7 @@ void ProjectDetections::initialize_subscribers()
 void ProjectDetections::initialize_publishers()
 {
     ground_plane_publisher = _nh.advertise<sensor_msgs::PointCloud2>("ground_plane_points", 1); 
+    ground_plane_z_publisher = _nh.advertise<std_msgs::Float32>("ground_level_z",1);
     marker_pub = _nh.advertise<visualization_msgs::Marker>("projected_detection_marker", 1);
     _ray_publisher = _nh.advertise<visualization_msgs::Marker>("camera_projected_ray", 1);
     _transform_publisher = _nh.advertise<geometry_msgs::TransformStamped>("camera_transfrom", 1);
@@ -132,6 +136,23 @@ void ProjectDetections::map_callback(const octomap_msgs::Octomap::ConstPtr &msg)
         _have_map = true;
     }
     _map = *msg;
+
+    // Convert the binary message to an octomap::AbstractOcTree pointer
+    octomap::AbstractOcTree* tree = octomap_msgs::binaryMsgToMap(*msg);
+    if (tree)
+    {
+        // Cast to RoughOcTree if necessary (based on your use case)
+        _tree = dynamic_cast<octomap::RoughOcTree*>(tree); 
+        if (!_tree)
+        {
+            ROS_ERROR("Failed to cast OctoMap to RoughOcTree");
+            delete tree;
+        }
+    }
+    else
+    {
+        ROS_ERROR("Failed to convert octomap message to AbstractOcTree");
+    }
 }
 
 /**
@@ -152,17 +173,19 @@ void ProjectDetections::object_detections_callback(const llm_robot_client::Objec
 
 void ProjectDetections::cam_info_callback(const sensor_msgs::CameraInfo::ConstPtr &msg)
 {
+    ROS_INFO("[Project Detections] Entered cam info callback ..."); 
     std::string cam_frame = msg->header.frame_id;
+    ROS_INFO("Received CameraInfo for frame: %s", cam_frame.c_str());
     // If Cam frame not in map add it
     if (!_cam_models_map.count(cam_frame))
     {
-        ROS_DEBUG("[Project Detections]: Insesrting %s into camera map.", cam_frame.c_str());
+        // ROS_WARN("[Project Detections]: Insesrting %s into camera map.", cam_frame.c_str());
         image_geometry::PinholeCameraModel current_camera_model;
         current_camera_model.fromCameraInfo(*msg);
         _cam_models_map.emplace(cam_frame, current_camera_model);
+    } else {
+        ROS_INFO("Camera frame %s already exists in the map.", cam_frame.c_str());
     }
-
-    // TODO unsubscribe after all camera info messages recieved
 }
 
 /**
@@ -193,6 +216,7 @@ cv::Point3d ProjectDetections::project_cam_xy(std::string &cam_frame, cv::Point2
 
 bool ProjectDetections::lookup_transform(std::string &frame1, std::string &frame2, ros::Time time, geometry_msgs::TransformStamped &transfrom)
 {
+    // ROS_WARN("looking up requested transform between %s and %s ... ",frame1.c_str(),frame2.c_str()); 
     try
     {
         transfrom = _tf_buffer->lookupTransform(frame1, frame2, time, ros::Duration(1.0));
@@ -200,9 +224,14 @@ bool ProjectDetections::lookup_transform(std::string &frame1, std::string &frame
     }
     catch (tf2::TransformException &ex)
     {
-        ROS_DEBUG("TF Lookup failed %s", ex.what());
-        ROS_WARN("%s", ex.what());
-        return false;
+        try {
+            transfrom = _tf_buffer->lookupTransform(frame1, frame2, ros::Time(0), ros::Duration(1.0));
+            return true; 
+        } catch (tf2::TransformException &ex) {
+            ROS_DEBUG("TF Lookup failed %s", ex.what());
+            ROS_WARN("%s", ex.what());
+            return false;
+        }
     }
 }
 
@@ -212,6 +241,18 @@ bool ProjectDetections::project_cam_world(cv::Point3d initial_ray, std::string &
 
     geometry_msgs::TransformStamped transform;
     geometry_msgs::TransformStamped transform_back;
+
+    auto current_namespace = _nh.getNamespace(); 
+
+    if (!current_namespace.empty() && current_namespace[0] == '/') {
+            current_namespace.erase(0, 1);  // Remove the leading '/'
+        } 
+
+    if (!(cam_frame.find(current_namespace) != std::string::npos)){
+        cam_frame = current_namespace + "/" + std::string(cam_frame);
+    }
+
+    // ROS_WARN("Calling lookup transform with world_frame_id: %s and cam_frame_id: %s", reference_frame.c_str(), cam_frame.c_str()); 
     if (lookup_transform(reference_frame, cam_frame, time, transform))
     {
         ROS_DEBUG("Projecting Cam Ray into World Ray");
@@ -246,7 +287,7 @@ bool ProjectDetections::project_cam_world(cv::Point3d initial_ray, std::string &
         world_ray.z = world_ray_vector.z;
 
         return true;
-    }
+    } 
     return false;
 }
 
@@ -325,6 +366,65 @@ void ProjectDetections::publish_point(octomap::point3d &point)
     ROS_DEBUG("[Project Detections]: Publishing ray");
     _ray_publisher.publish(direction_viz);
 }
+
+void ProjectDetections::publish_ground_plane_cloud(){
+    // Apply a PassThrough filter to remove points with z-values greater than 0.2 meters
+    pcl::PassThrough<pcl::PointXYZ> pass;
+    pass.setInputCloud(_cloud);
+    pass.setFilterFieldName("z");
+    pass.setFilterLimits(-std::numeric_limits<float>::max(), 0.0); // Keep points with z <= 0.1
+    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    pass.filter(*filtered_cloud);
+
+    // Segment the largest plane in the filtered point cloud
+    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+    pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+    pcl::SACSegmentation<pcl::PointXYZ> seg;
+    seg.setOptimizeCoefficients(true);
+    seg.setModelType(pcl::SACMODEL_PLANE);
+    seg.setMethodType(pcl::SAC_RANSAC);
+    seg.setMaxIterations(1000);
+    seg.setDistanceThreshold(0.01);
+    seg.setInputCloud(filtered_cloud); // Use the filtered cloud
+    seg.segment(*inliers, *coefficients);
+
+    if (inliers->indices.size() == 0) {
+        ROS_WARN("Could not estimate a planar model for the given dataset.");
+    } else {
+        // Extract the Z component (assuming the plane is horizontal)
+        float a = coefficients->values[0];
+        float b = coefficients->values[1];
+        float c = coefficients->values[2]; // Z component coefficient
+        float d = coefficients->values[3];
+
+        // Calculate the Z intercept (assuming plane equation: ax + by + cz + d = 0)
+        // Z = -(a*x + b*y + d)/c, when x = 0, y = 0
+        float z_value = -d / c;
+
+        // Publish the ground plane Z value
+        std_msgs::Float32 z_msg;
+        z_msg.data = z_value;
+        ground_plane_z_publisher.publish(z_msg);
+        ROS_INFO("Published ground plane Z value: %f", z_value);
+    }
+
+    // Extract the plane points
+    pcl::ExtractIndices<pcl::PointXYZ> extract;
+    extract.setInputCloud(filtered_cloud);
+    extract.setIndices(inliers);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr ground_plane_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    extract.filter(*ground_plane_cloud);
+
+    // Convert the extracted ground plane points to a ROS PointCloud2 message
+    sensor_msgs::PointCloud2 ground_plane_msg;
+    pcl::toROSMsg(*ground_plane_cloud, ground_plane_msg);
+    ground_plane_msg.header.frame_id = "/H03/base_link";  // Replace with your frame ID
+    ground_plane_msg.header.stamp = ros::Time::now();
+
+    // Publish the ground plane points
+    ground_plane_publisher.publish(ground_plane_msg);
+    ROS_INFO("Published ground plane points.");
+} 
 
 void ProjectDetections::publish_projected_detections(llm_robot_client::ProjectedDetectionArray &projected_detections)
 {
@@ -447,15 +547,13 @@ void ProjectDetections::debug_rviz(octomap::point3d &origin, octomap::point3d &d
 
 bool ProjectDetections::project_detection(llm_robot_client::ObjectDetection &detection, octomap::RoughOcTree *current_octree, llm_robot_client::ProjectedDetection &projected_detection)
 {
-    auto current_namespace = _nh.getNamespace();
-    current_namespace.erase(0, 1);
+    auto current_namespace = _nh.getNamespace(); 
+    if (!current_namespace.empty() && current_namespace[0] == '/') {
+            current_namespace.erase(0, 1);  // Remove the leading '/'
+        } 
+
     std::string cam_frame = detection.header.frame_id;
     std::string cam_frame_id = cam_frame;
-    if (!(cam_frame.find(current_namespace) != std::string::npos))
-    {
-        ROS_DEBUG("Adding namespace to tf");
-        cam_frame_id = current_namespace + "/" + cam_frame;
-    }
 
     // List to store projected contour points
     std::vector<geometry_msgs::Point> projected_contour_points;
@@ -479,6 +577,7 @@ bool ProjectDetections::project_detection(llm_robot_client::ObjectDetection &det
         std::string lidar_frame_id = current_namespace + "/" + lidar_link;
         std::string world_frame_id = "world";
 
+        // ROS_WARN("Calling lookup transform with world_frame_id: %s and lidar_frame_id: %s", world_frame_id.c_str(), lidar_frame_id.c_str());
         if (lookup_transform(world_frame_id, lidar_frame_id, ros::Time::now(), lidar_to_world))
         {
             octomap::point3d artifact_location;
@@ -494,7 +593,8 @@ bool ProjectDetections::project_detection(llm_robot_client::ObjectDetection &det
                 if (!projection_status)
                 {
                     octomap::point3d intersection;
-                    bool intersection_status = findIntersectionWithGround(origin, direction, artifact_location); 
+                    bool intersection_status = findIntersectionWithGround(origin, direction, intersection); 
+                    //bool intersection_status = findIntersectionWithGround(origin, direction, artifact_location); 
                     if (intersection_status)
                     {
                         ROS_INFO("Found intersection with the ground plane for center point!");
@@ -529,7 +629,7 @@ bool ProjectDetections::project_detection(llm_robot_client::ObjectDetection &det
                         if (!contour_projection_status)
                         {
                             octomap::point3d contour_intersection;
-                            bool contour_intersection_status = findIntersectionWithGround(origin, contour_direction, contour_location); 
+                            bool contour_intersection_status = findIntersectionWithGround(origin, contour_direction, contour_intersection); 
 
                             if (contour_intersection_status)
                             {
@@ -576,6 +676,7 @@ bool ProjectDetections::project_detection(llm_robot_client::ObjectDetection &det
  */
 void ProjectDetections::run()
 {
+    publish_ground_plane_cloud(); 
     // If there are detections in the queue process them
     if (!_detection_queue.empty())
     {
@@ -607,7 +708,6 @@ void ProjectDetections::run()
     }
 }
 
-
 bool ProjectDetections::findIntersectionWithGround(const octomap::point3d &origin, const octomap::point3d &direction, octomap::point3d &intersection) {
     // Apply a PassThrough filter to remove points with z-values greater than 0.2 meters
     pcl::PassThrough<pcl::PointXYZ> pass;
@@ -633,23 +733,6 @@ bool ProjectDetections::findIntersectionWithGround(const octomap::point3d &origi
         ROS_WARN("Could not estimate a planar model for the given dataset.");
         return false;
     }
-
-    // Extract the plane points
-    pcl::ExtractIndices<pcl::PointXYZ> extract;
-    extract.setInputCloud(filtered_cloud);
-    extract.setIndices(inliers);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr ground_plane_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-    extract.filter(*ground_plane_cloud);
-
-    // Convert the extracted ground plane points to a ROS PointCloud2 message
-    sensor_msgs::PointCloud2 ground_plane_msg;
-    pcl::toROSMsg(*ground_plane_cloud, ground_plane_msg);
-    ground_plane_msg.header.frame_id = "/H03/base_link";  // Replace with your frame ID
-    ground_plane_msg.header.stamp = ros::Time::now();
-
-    // Publish the ground plane points
-    ground_plane_publisher.publish(ground_plane_msg);
-    ROS_INFO("Published ground plane points.");
 
     // Output the z-value of the plane's normal vector
     float z_normal = coefficients->values[2];
@@ -681,65 +764,116 @@ bool ProjectDetections::get_pixel_from_3d(
     llm_robot_client::GetPixelFrom3D::Response &res)
 {
     // Get the camera frame from the request
-    std::string cam_frame = req.cam_frame;
-    
+    //std::string cam_frame = req.cam_frame;
+    std::string cam_frame = "cam_front_link"; 
+
     // Check if the camera frame is present in the camera models map
     if (_cam_models_map.count(cam_frame) == 0)
     {
+        for (const auto &cam : _cam_models_map)
+        {
+            ROS_WARN("Available camera frame: %s", cam.first.c_str());
+        }
+
         ROS_ERROR("Camera frame %s not found!", cam_frame.c_str());
         return false;
     }
-
+    
     // Get the camera model
     auto current_model = _cam_models_map.at(cam_frame);
 
-    // Create a 3D point (in world coordinates)
-    cv::Point3d world_point(req.x, req.y, req.z);
+    // ROS_WARN("Camera intrinsics: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
+        //  current_model.fx(), current_model.fy(),
+        //  current_model.cx(), current_model.cy());
+ 
+    // Lookup the transform from world frame to camera frame
+    geometry_msgs::TransformStamped transform;
 
-    // Convert the 3D point in the world frame to the 2D pixel coordinate in the camera frame
-    cv::Point2d pixel = current_model.project3dToPixel(world_point);
+    auto current_namespace = _nh.getNamespace(); 
 
+    if (!current_namespace.empty() && current_namespace[0] == '/') {
+            current_namespace.erase(0, 1);  // Remove the leading '/'
+        } 
+
+    if (!(cam_frame.find(current_namespace) != std::string::npos)){
+        cam_frame = current_namespace + "/" + std::string(cam_frame);
+    }
+    
+    try {
+        transform = _tf_buffer->lookupTransform("world", cam_frame, ros::Time(0), ros::Duration(1.0));
+        // ROS_WARN("Transform from world to %s: [%.2f, %.2f, %.2f] rotation: [%.2f, %.2f, %.2f, %.2f]",
+        //      cam_frame.c_str(),
+        //      transform.transform.translation.x,
+        //      transform.transform.translation.y,
+        //      transform.transform.translation.z,
+        //      transform.transform.rotation.x,
+        //      transform.transform.rotation.y,
+        //      transform.transform.rotation.z,
+        //      transform.transform.rotation.w); 
+    } catch (tf2::TransformException &ex) {
+        ROS_WARN("Transform failed: %s", ex.what());
+        return false;
+    }
+
+    // ROS_WARN("This is requested 3D point: (%.2f,%.2f,%.2f)",req.x,req.y,req.z); 
+    // Transform the 3D point from world frame to camera frame
+    tf2::Vector3 world_point(req.x, req.y, req.z); 
+
+    tf2::Vector3 cam_point = tf2::Transform(tf2::Quaternion(
+        transform.transform.rotation.x, transform.transform.rotation.y,
+        transform.transform.rotation.z, transform.transform.rotation.w),
+        tf2::Vector3(
+        transform.transform.translation.x, transform.transform.translation.y,
+        transform.transform.translation.z)).inverse() * world_point;
+
+    // Project the transformed 3D point (in the camera frame) to 2D pixel coordinates
+    cv::Point3d transformed_point(-cam_point.y(), -cam_point.z(), cam_point.x());
+
+    //ROS_WARN("Transformed 3D point in camera frame: (%.2f, %.2f, %.2f)", cam_point.x(), cam_point.y(), cam_point.z());
+ 
+    cv::Point2d pixel = current_model.project3dToPixel(transformed_point);
+    
     // Set the pixel coordinates in the response
     res.u = pixel.x;
     res.v = pixel.y;
 
     return true;
 }
-
+    
 void ProjectDetections::initialize_services()
 {
     // Define the service
     _get_world_to_pixel_service = _nh_private.advertiseService(
         "get_pixel_from_3d", &ProjectDetections::get_pixel_from_3d, this);
-    ROS_INFO("Service get_pixel_from_3d initialized.");
+    ROS_INFO("[project detections] Service get_pixel_from_3d initialized!");
     // Initialize the service that projects pixels to world points
     _get_pixel_to_world_service = _nh_private.advertiseService(
         "get_3d_point_from_pixel", &ProjectDetections::get_3d_point_from_pixel, this);
-    ROS_INFO("Service get3DPointFromPixel initialized.");
+    ROS_INFO("[project detections] Service get3DPointFromPixel initialized!");
     // Initialize the service that projects pixels to world points
     _get_back_of_bbox_service = _nh_private.advertiseService(
         "get_back_of_bbox_from_pixel", &ProjectDetections::get_back_of_bbox_from_pixel, this);
-    ROS_INFO("Service get_back_of_bbox_from_pixel initialized.");
+    ROS_INFO("[project detections] Service get_back_of_bbox_from_pixel initialized!");
 }
 
 bool ProjectDetections::get_3d_point_from_pixel(
     llm_robot_client::Get3DPointFromPixel::Request &req,
     llm_robot_client::Get3DPointFromPixel::Response &res)
 {
-    auto current_namespace = _nh.getNamespace();
-    current_namespace.erase(0, 1);
-    //std::string cam_frame = detection.header.frame_id;
     std::string cam_frame = req.cam_frame;
     std::string cam_frame_id = req.cam_frame;
-    if (!(cam_frame.find(current_namespace) != std::string::npos))
-    {
-        ROS_DEBUG("Adding namespace to tf");
-        cam_frame_id = current_namespace + "/" + cam_frame;
-    }
+
+    ROS_INFO("Entered the service call!");
+
+    auto current_namespace = _nh.getNamespace(); 
+    if (!current_namespace.empty() && current_namespace[0] == '/') {
+            current_namespace.erase(0, 1);  // Remove the leading '/'
+        } 
 
     // Check if the camera frame is present in the camera models map
     if (_cam_models_map.count(cam_frame) == 0)
     {
+
         ROS_ERROR("Camera frame %s not found!", cam_frame.c_str());
         return false;
     }
@@ -761,61 +895,55 @@ bool ProjectDetections::get_3d_point_from_pixel(
 
     if (cam_ray_status)
     {
-        // If projection was successful, set the 3D world point in the response
-        res.world_point.x = world_ray.x;
-        res.world_point.y = world_ray.y;
-        res.world_point.z = world_ray.z;
-
-        ROS_INFO("Projected pixel (%.2f, %.2f) from camera '%s' to world point (%.2f, %.2f, %.2f)",
-                  req.u, req.v, cam_frame.c_str(), world_ray.x, world_ray.y, world_ray.z);
-
-        return true;
-    }
-    else
-    {
-        // Projection failed, try to find intersection with the ground plane
-        ROS_WARN("Failed to project camera ray to world frame. Checking for intersection with ground plane.");
-
-        // Assuming you have a lidar link to provide the origin of the ray
-        std::string lidar_link = _nh_private.param("lidar_link", std::string("lidar_link"));
+        std::string lidar_link = _nh_private.param("lidar_link", lidar_link);
         geometry_msgs::TransformStamped lidar_to_world;
-        std::string lidar_frame_id = lidar_link;
+        std::string lidar_frame_id = current_namespace + "/" + lidar_link;
         std::string world_frame_id = "world";
 
-        // Lookup the lidar transform (used as origin)
-        if (!lookup_transform(world_frame_id, lidar_frame_id, ros::Time::now(), lidar_to_world))
+        // ROS_WARN("Calling lookup transform with world_frame_id: %s and lidar_frame_id: %s", world_frame_id.c_str(), lidar_frame_id.c_str());
+        if (lookup_transform(world_frame_id, lidar_frame_id, ros::Time::now(), lidar_to_world))
         {
-            ROS_ERROR("Failed to lookup lidar to world transform");
-            return false;
-        }
+            octomap::point3d artifact_location;
+            octomap::point3d origin(lidar_to_world.transform.translation.x, lidar_to_world.transform.translation.y, lidar_to_world.transform.translation.z);
+            octomap::point3d direction(projected_cam_ray.x, projected_cam_ray.y, projected_cam_ray.z);
 
-        // Set the origin and direction of the ray
-        octomap::point3d origin(lidar_to_world.transform.translation.x, lidar_to_world.transform.translation.y, lidar_to_world.transform.translation.z);
-        octomap::point3d direction(projected_cam_ray.x, projected_cam_ray.y, projected_cam_ray.z);
+            if (_tree != NULL)
+            {
+                double projection_distance = 12.0;
+                bool projection_status = _tree->castRay(origin, direction, artifact_location, true, projection_distance);
 
-        // Try to find intersection with the ground
-        octomap::point3d intersection_point;
-        bool intersection_status = findIntersectionWithGround(origin, direction, intersection_point);
+                // If projection fails, find intersection with ground plane for center point
+                if (!projection_status)
+                {
+                    octomap::point3d intersection;
+                    bool intersection_status = findIntersectionWithGround(origin, direction, intersection); 
+                    if (intersection_status)
+                    {
+                        ROS_INFO("Found intersection with the ground plane for center point!");
+                        //create_projected_detection(intersection, detection, projected_detection);
+                        res.world_point.x = intersection.x();
+                        res.world_point.y = intersection.y(); 
+                        res.world_point.z = intersection.z(); 
+                    }
+                    else
+                    {
+                        ROS_DEBUG("[Project Detections]: Failed to project ray or find ground plane for center point");
+                    }
+                }
+                else
+                {
+                    //create_projected_detection(artifact_location, detection, projected_detection);
+                    res.world_point.x = artifact_location.x();
+                    res.world_point.y = artifact_location.y(); 
+                    res.world_point.z = artifact_location.z(); 
+                }
 
-        if (intersection_status)
-        {
-            // If intersection with the ground is successful, return that point
-            res.world_point.x = intersection_point.x();
-            res.world_point.y = intersection_point.y();
-            res.world_point.z = intersection_point.z();
-
-            ROS_INFO("Projected pixel (%.2f, %.2f) from camera '%s' intersected with the ground at (%.2f, %.2f, %.2f)",
-                     req.u, req.v, cam_frame.c_str(), intersection_point.x(), intersection_point.y(), intersection_point.z());
-
-            return true;
-        }
-        else
-        {
-            ROS_ERROR("No intersection with ground plane found.");
-            return false;
+                return true;
+            }
         }
     }
-} 
+    return false;
+}
 
 /*
     const octomap::point3d& front_point, 
@@ -849,39 +977,38 @@ bool ProjectDetections::get_back_of_bbox_from_pixel(
     llm_robot_client::ProjectBackOfBbox::Request &req,
     llm_robot_client::ProjectBackOfBbox::Response &res)
 {
-    std::string cam_frame = req.cam_frame;
-
-    // Check if the camera frame is present in the camera models map
-    if (_cam_models_map.count(cam_frame) == 0)
-    {
-        ROS_ERROR("Camera frame %s not found!", cam_frame.c_str());
+    if (!_have_map) {
+        ROS_ERROR("Map not available.");
         return false;
     }
+    ROS_DEBUG("Map is available.");
 
-    // Get the camera model
-    auto current_model = _cam_models_map.at(cam_frame);
+    std::string cam_frame = req.cam_frame;
 
-    // Project the pixel (u, v) into 3D world space to get the front corners
-    cv::Point2d pixel(req.u, req.v);
-    cv::Point3d front_ray = project_cam_xy(cam_frame, pixel);
-    cv::Point3d world_ray;
+    // Project center point of the bounding box
+    cv::Point2d center_point(req.u, req.v);
+
+    auto projected_cam_ray = project_cam_xy(cam_frame, center_point);
+    ROS_WARN("[Project Detections]: Projected center ray from camera in LOCAL: %s, %s, %s.", 
+              std::to_string(projected_cam_ray.x).c_str(), std::to_string(projected_cam_ray.y).c_str(), std::to_string(projected_cam_ray.z).c_str());
+
     std::string reference_frame = "world";
-    bool success = project_cam_world(front_ray, reference_frame, cam_frame, ros::Time::now(), world_ray);
-
+    bool success = project_cam_world(projected_cam_ray, reference_frame, cam_frame, ros::Time::now(), projected_cam_ray);
+    
     if (!success) {
         ROS_ERROR("Failed to project pixel to world space.");
         return false;
-    }
+    } 
 
     // Store the front corner in the response
     geometry_msgs::Point front_corner;
-    front_corner.x = world_ray.x;
-    front_corner.y = world_ray.y;
-    front_corner.z = world_ray.z;
+    front_corner.x = projected_cam_ray.x;
+    front_corner.y = projected_cam_ray.y;
+    front_corner.z = projected_cam_ray.z;
     res.front_corners.push_back(front_corner);
 
     // Find the back of the bounding box using raycasting
-    octomap::point3d front_point(world_ray.x, world_ray.y, world_ray.z);
+    octomap::point3d front_point(projected_cam_ray.x, projected_cam_ray.y, projected_cam_ray.z);
     octomap::point3d direction(0, 0, -1);  // Assuming negative z-direction for the depth
     octomap::point3d back_point;
 

@@ -123,7 +123,8 @@ class CamProjector:
     def pose_to_transformation_matrix(pose):
         tf_matrix = np.zeros((4,4))
         r = R.from_euler("XYZ", pose[3:], degrees=False)
-        tf_matrix[:3,:3] = r.as_matrix()
+        #tf_matrix[:3,:3] = r.as_matrix() 
+        tf_matrix[:3,:3] = r.as_dcm() 
         tf_matrix[0,3] = pose[0]
         tf_matrix[1,3] = pose[1]
         tf_matrix[3,3] = pose[2]

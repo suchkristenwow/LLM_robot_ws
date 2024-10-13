@@ -12,8 +12,7 @@ def encode_image(image_path):
 def generate_with_openai(prompt, conversation_history=None, max_retries=25, retry_delay=10, n_predict=2048, temperature=0.9, top_p=0.9, image_path=None):
     print("Trying to get an answer from ChatGPT, hold on ...")
     attempts = 0
-    openai_api_key = os.getenv("openai_key")
-    
+    openai_api_key = os.getenv("OPEN_API_KEY")
     if conversation_history is None:
         conversation_history = [
             {
@@ -94,7 +93,7 @@ def generate_with_openai(prompt, conversation_history=None, max_retries=25, retr
             attempts += 1
             if attempts < max_retries:
                 #print(f"Retrying in {retry_delay} seconds...")
-                print("Retrying in "+ string(retry_delay) + " seconds...")
+                print("Retrying in "+ str(retry_delay) + " seconds...")
                 time.sleep(retry_delay)
             else:
                 print("Max retries reached. Unable to complete request.")
@@ -103,3 +102,8 @@ def generate_with_openai(prompt, conversation_history=None, max_retries=25, retr
             #print(f"Unexpected error: {e}")
             print("Unexpected error: "+str(e))
             raise
+
+if __name__ == "__main__":
+    prompt = "What is in this image?"
+    response,_ = generate_with_openai(prompt,image_path="/home/marble/cat.jpeg") 
+    print("response: ",response)
