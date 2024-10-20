@@ -130,23 +130,33 @@ void ProjectDetections::point_cloud_callback(const sensor_msgs::PointCloud2::Con
 
 void ProjectDetections::map_callback(const octomap_msgs::Octomap::ConstPtr &msg)
 {
-    // ROS_DEBUG("[Localize Artfiacts:] Recieved Map");
+    // ROS_DEBUG("[Localize Artifacts:] Received Map");
+
+    // Set the flag indicating that we have received a map
     if (!_have_map)
     {
         _have_map = true;
     }
-    _map = *msg;
+    _map = *msg;  // Store the received map message
 
     // Convert the binary message to an octomap::AbstractOcTree pointer
-    octomap::AbstractOcTree* tree = octomap_msgs::binaryMsgToMap(*msg);
-    if (tree)
+    octomap::AbstractOcTree* abstract_tree = octomap_msgs::binaryMsgToMap(*msg);
+    
+    if (abstract_tree)
     {
-        // Cast to RoughOcTree if necessary (based on your use case)
-        _tree = dynamic_cast<octomap::RoughOcTree*>(tree); 
-        if (!_tree)
+        // Cast the abstract tree to a RoughOcTree (use case dependent)
+        octomap::RoughOcTree* rough_tree = dynamic_cast<octomap::RoughOcTree*>(abstract_tree);
+
+        if (rough_tree)
         {
+            // Successfully cast to RoughOcTree, now we can assign it to the member variable
+            _tree = rough_tree;
+        }
+        else
+        {
+            // Failed to cast to RoughOcTree
             ROS_ERROR("Failed to cast OctoMap to RoughOcTree");
-            delete tree;
+            delete abstract_tree;  // Clean up memory if cast fails
         }
     }
     else
@@ -154,6 +164,7 @@ void ProjectDetections::map_callback(const octomap_msgs::Octomap::ConstPtr &msg)
         ROS_ERROR("Failed to convert octomap message to AbstractOcTree");
     }
 }
+
 
 /**
  * Object Detections Callback
@@ -214,18 +225,18 @@ cv::Point3d ProjectDetections::project_cam_xy(std::string &cam_frame, cv::Point2
     return projected_ray;
 }
 
-bool ProjectDetections::lookup_transform(std::string &frame1, std::string &frame2, ros::Time time, geometry_msgs::TransformStamped &transfrom)
+bool ProjectDetections::lookup_transform(std::string &frame1, std::string &frame2, ros::Time time, geometry_msgs::TransformStamped &transform)
 {
-    // ROS_WARN("looking up requested transform between %s and %s ... ",frame1.c_str(),frame2.c_str()); 
+    ROS_WARN("looking up requested transform between %s and %s ... ",frame1.c_str(),frame2.c_str()); 
     try
     {
-        transfrom = _tf_buffer->lookupTransform(frame1, frame2, time, ros::Duration(1.0));
+        transform = _tf_buffer->lookupTransform(frame1, frame2, time, ros::Duration(1.0));
         return true;
     }
     catch (tf2::TransformException &ex)
     {
         try {
-            transfrom = _tf_buffer->lookupTransform(frame1, frame2, ros::Time(0), ros::Duration(1.0));
+            transform = _tf_buffer->lookupTransform(frame1, frame2, ros::Time(0), ros::Duration(1.0));
             return true; 
         } catch (tf2::TransformException &ex) {
             ROS_DEBUG("TF Lookup failed %s", ex.what());

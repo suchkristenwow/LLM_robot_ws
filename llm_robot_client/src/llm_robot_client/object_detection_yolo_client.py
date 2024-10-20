@@ -116,12 +116,16 @@ class ObjectDetectionClient:
             "~publish_detections_image", True
         )
         self.object_detection_server_url = rospy.get_param(
-            "~object_detection_server_url", "http://0.0.0.0.edu:5000"
-        )
+            "~object_detection_server_url") 
+
+        '''
         self.segment_anything_server_url = rospy.get_param(
-            "~segment_anything_server_url", "http://0.0.0.0.edu:5000"
-        )
+            "~segment_anything_server_url") 
+        ''' 
         
+        self.qwen_server_url = rospy.get_param(
+            "~qwen_server_url") 
+
         self.object_detector_status_topic = rospy.get_param(
             "~object_detector_status_topic", "object_detector/server_status"
         )
@@ -219,23 +223,24 @@ class ObjectDetectionClient:
 
         #TO DO: Load in OOD Objects 
         self.ood_objects = {}
+        '''
         with open("/home/marble/LLMGuidedSeeding/prompts/custom_objects/tape.txt",'r') as f:
             self.ood_objects['tape'] = f.read() 
+        ''' 
+        with open("/home/marble/LLMGuidedSeeding/prompts/custom_objects/spot.txt",'r') as f:
+            self.ood_objects['spot_robot'] = f.read() 
 
         self.cam_frame_ids = {'right': None, 'front': None, 'left': None}
         
         self.frame_width = None
 
-        self.largest_ground_mask = {} 
-
-        self.init_ground_mask_thread() 
-        
         self.init_detection_thread()
 
         rospy.loginfo("[object_detection_client] loaded and ready")
         
+    
+        """        
         self.server_running = False
-        
         request = {"action": "initialize"}
         rospy.loginfo("initializing segment anything server ...") 
         response = requests.post(
@@ -244,10 +249,19 @@ class ObjectDetectionClient:
                     timeout=10
                 ) 
 
+        request = {"action": "initialize", "context" : context}
+        rospy.loginfo("initializing segment anything server ...") 
+        response = requests.post(
+                    self.qwen_server_url + "/initialize",
+                    json=request, 
+                    timeout=10
+                ) 
+
         if response.status_code != 200:
             rospy.logwarn("Segment Anything Server initialization failed with response: %s",response.text)
 
         rospy.loginfo("Done initializing Segment Anything server") 
+        """ 
 
     @staticmethod
     def crop_image_to_bounding_box(mask, orig_image, path):
@@ -382,73 +396,6 @@ class ObjectDetectionClient:
             cv2.imwrite(path, image)
 
         return msg
-    
-    def find_largest_ground_mask(self, image_data, frame):
-        """
-        Finds the largest ground mask for the given frame.
-        """
-        encoded_image = process_image(image_data['image'][frame])
-        request = {
-            'action': 'get_ground_mask',
-            'frame': frame,
-            'time': time.time(),
-            'image': encoded_image
-        }
-
-        rospy.loginfo("Posting request to segment anything server for ground mask...")
-        t0 = time.time()
-        response = requests.post(self.segment_anything_server_url + "/get_ground_mask", json=request)
-        rospy.loginfo("Received response from segment anything server in {} seconds.".format(np.round(time.time() - t0, 2)))
-
-        if response.status_code != 200:
-            rospy.logwarn("Failed to get ground mask: {}".format(response.text))
-            return None
-
-        # Get the JSON data from the response
-        response_data = response.json()
-        shape = response_data['img_shape']
-
-        # Extract mask data and reshape the masks to match the image size
-        h, w, c = image_data['image'][frame].shape
-        #masks = [np.reshape(np.array(mask), (h, w)) for mask in response_data['masks']]
-        arr_masks = [np.array(x) for x in response_data['masks']]
-        masks = [mask.reshape(shape) for mask in arr_masks] 
-
-        max_area = 0
-        largest_mask = None
-        for mask in masks:
-            area = np.sum(mask)
-            if area > max_area:
-                largest_mask = mask
-                max_area = area
-
-        return largest_mask
-
-    def run_largest_ground_mask_thread(self):
-        """
-        This will run in a separate thread.
-        """
-        image_list = ['front', 'left', 'right']
-        while not rospy.is_shutdown():
-            for frame in image_list:
-                rospy.loginfo("Finding ground mask for frame: {}".format(frame))
-                if len(self.image_queue) > 0 and len(self.ood_objects) > 0:
-                    # Get the image data from the queue
-                    image_data = copy.deepcopy(self.image_queue.pop()) 
-                    
-                    # Acquire the lock to safely update self.largest_ground_mask
-                    with self.ground_mask_lock:
-                        self.largest_ground_mask[frame] = self.find_largest_ground_mask(image_data, frame)
-                        rospy.loginfo("Updated largest ground mask for frame: " + frame)
-                    
-                rospy.sleep(0.1)  # Sleep to avoid overloading the loop
-
-
-    def init_ground_mask_thread(self):
-        self.ground_mask_lock = threading.Lock()
-        self.largest_ground_mask = {}  # Dictionary to store the largest ground mask for each frame
-        self.ground_mask_thread = threading.Thread(target=self.run_largest_ground_mask_thread)
-        self.ground_mask_thread.start()
 
     def init_detection_thread(self):
         self.detection_lock = threading.Lock()
@@ -668,13 +615,10 @@ class ObjectDetectionClient:
         for frame in image_list:
             print("writing {}".format(('/home/marble/tmp_frame.jpg'))) 
             cv2.imwrite('/home/marble/tmp_frame.jpg',image_data['image'][frame]) 
-
             try:
                 for custom_obj in self.ood_objects.keys():
-                    #print("custom_obj: ",custom_obj)
-                    #1. Ask ChatGPT if foo is in the frame 
+                    #1. Ask ChatGPT if foo is in the frame
                     '''
-                    #im commenting this out bc I want to speed things up 
                     prompt = "The user has defined a "+custom_obj+" like this: \n" + self.ood_objects[custom_obj] + ". Is there " + custom_obj + " in this image?"
                     print("prompt: ",prompt)
                     response,history = generate_with_openai(prompt,image_path='/home/marble/tmp_frame.jpg')
@@ -682,7 +626,8 @@ class ObjectDetectionClient:
                     #2. If so, are there multiple foo 
                     if not 'yes' in response.lower():
                         continue 
-                    prompt = "Are there more than one " + custom_obj + " in this image?" 
+                    obj_bbs = []
+                    prompt = "Is there more than one " + custom_obj + " in this image?" 
                     print("prompt: ",prompt)
                     response,history = generate_with_openai(prompt,conversation_history=history,image_path='/home/marble/tmp_frame.jpg') 
                     print("response: ",response)
@@ -690,98 +635,73 @@ class ObjectDetectionClient:
                     if 'yes' in response.lower():
                         multi_obj = True 
                     ''' 
-                    
-                    multi_obj = True 
-                    
-                    #3. Would foo on the ground in this image? 
-                    #on_ground = is_ground_obj(custom_obj,self.ood_objects[custom_obj],'/home/marble/tmp_frame.jpg') 
-                    on_ground = True 
-
-                    while frame not in self.largest_ground_mask.keys():
-                        rospy.sleep(0.1)
-                        print("waiting for ground mask ...")
-                        
-                    ground_bb = get_bounding_box_from_mask(self.largest_ground_mask[frame]) 
-
-                    frame_copy = copy.deepcopy(image_data['image'][frame])
-                    timestamp = datetime.now()
-
-                    # Convert to human-readable format
-                    human_readable =  timestamp.strftime("%Y-%m-%d_%H-%M-%S") 
-                    self.crop_image_to_bounding_box(self.largest_ground_mask[frame], frame_copy, "/home/marble/debug_imgs/" + frame +"_cropped_ground_bounding_box_"+human_readable+".jpg")
-                    cropped_img = cv2.imread("/home/marble/debug_imgs/" + frame +"_cropped_ground_bounding_box_"+human_readable+".jpg") 
-
-                    #self.draw_boundingBox_image(largest_ground_mask, image_data['image'][frame], 'bgr8', "/home/marble/ground_bounding_box.jpg") 
-
-                    encoded_cropped_img = process_image(cropped_img) 
-
+                    multi_obj = False 
+                    encoded_image = process_image(image_data['image'][frame])
+                    query = (
+                        "I'm looking for a " + custom_obj + ". The user has provided this description of a " + custom_obj + ": \n" +
+                        self.ood_objects[custom_obj] + "\n" + 
+                        "Draw a bounding box around the " + custom_obj + " in this image."
+                    )
                     request = {
-                        'action': 'get_possible_object_masks',
-                        'cropped_img' : encoded_cropped_img,
-                        'frame':frame, 
-                        'largest_ground_mask_boundingBox':ground_bb,
-                        'grounded':on_ground
+                        'action': 'get_bounding_box',
+                        'image': encoded_image,
+                        'query' : query 
                     }
+                    response_data = requests.post(self.qwen_server_url + "/get_bounding_box",json=request) 
 
-                    try:
-                        print("Trying to get possible object masks ...")
-                        # Make the request to the Segment Anything server
-                        t0 = time.time() 
-                        rospy.loginfo("posting request to segment anything server: {}".format('get_possible_object_masks')) 
-                        response = requests.post(self.segment_anything_server_url + "/get_possible_object_masks", json=request)
-                        print("that took {} seconds.".format(np.round(time.time() - t0,2)))  
+                    if response_data.status_code != 200:
+                        raise OSError 
 
-                        # Check for a successful response
-                        if response.status_code != 200:
-                            rospy.logwarn("Failed to get object masks: {}".format(response.text))
-                            return None, []
+                    response = response_data.json() 
+                    boundingBox = response["boundingBox"] 
 
-                        # Get the JSON data from the response
-                        response_data = response.json()
+                    if boundingBox is None:
+                        print("Could not find " + custom_obj) 
+                        continue  
 
-                        #print("type(response_data['masks'][0]): ",type(response_data['masks'][0]))
-                        # Extract mask and contour points from the JSON response
-                        possible_masks = [np.array(mask) for mask in response_data['masks']]
-                        #pad the mask with False to make it fit the size of the full image 
-                        '''
-                        possible_masks = []
-                        print("image.shape: {}".format(image_data['image'][frame].shape))
-                        for mask in raw_masks:
-                            print("mask.shape: {}".format(mask.shape))
-                            if mask.shape[0] != image_data['image'][frame].shape[0] or mask.shape[1] != image_data['image'][frame].shape[1]:
-                                print("padding mask ...")
-                                possible_masks.append(pad_mask(mask, image_data['image'][frame].shape)) 
+                    if isinstance(boundingBox,tuple): 
+                        obj_bbs.append(boundingBox) 
+                    else:
+                        print("boundingBox: ",boundingBox)
+                        print("type(boundingBox):",type(boundingBox)) 
+                        raise OSError 
+
+                    if multi_obj: 
+                        while boundingBox is not None: 
+                            mask_img = copy.deepcopy(image_data['image'][frame])
+                            for bb in obj_bbs:
+                                mask_img = draw_filled_box(mask_img,bb) 
+
+                            encoded_image = process_image(mask_img) 
+                            query = ("I'm looking for a " + custom_obj + ". The user has provided this description of a " + custom_obj + ": " + "\n" +  
+                                self.ood_objects[custom_obj] + "\n" + "Draw a bounding box around the " + custom_obj + "in this image." + "\n" + 
+                                + "Ignore the regions of the image that have been masked out by black boxes.")
+
+                            request = {
+                                'action': 'get_bounding_box',
+                                'image': encoded_image,
+                                'query' : query 
+                            }
+                            response_data = requests.post(self.qwen_server_url + "/get_bounding_box",json=request) 
+                            if response_data.status_code != 200:
+                                raise OSError 
+
+                            response = response_data.json() 
+                            boundingBox = response["boundingBox"]  
+
+                            if boundingBox is None:
+                                print("Could not find any more " + custom_obj) 
+                                break 
+                            
+                            if isinstance(boundingBox,tuple): 
+                                obj_bbs.append(boundingBox) 
                             else:
-                                possible_masks.append(mask) 
-                        print("there are {} possible_masks ...".format(len(possible_masks))) 
-                        ''' 
-                    except requests.exceptions.RequestException as e:
-                        rospy.logerr("Error querying the segment anything sergver: {}".format(e))
-
-                    #masks,image_data,obj_size,image_frame 
-                    ''' 
-                    if multi_obj:
-                        print("incrementing max masks for consideration ...")
-                        max_masks_for_consideration = max_masks_for_consideration * 5
-                    ''' 
-
-                    #possible_masks = filter_masks(possible_masks,image_data['image'][frame],custom_obj,self.ood_objects[custom_obj],obj_size,frame,obj_colors,max_masks_for_consideration) 
-                    # Get current timestamp
-                    timestamp = datetime.now()
-
-                    # Convert to human-readable format
-                    human_readable =  timestamp.strftime("%Y-%m-%d_%H-%M-%S") 
-
-                    custom_obj_masks = audition_masks(custom_obj,possible_masks,cropped_img,human_readable,frame,object_description = self.ood_objects[custom_obj], multiple_objects=multi_obj) 
-
-                    while self.ground_level is None:
-                        print("waiting to receive ground level message ... ")
-                        rospy.sleep(1.0)
-
-                    custom_obj_masks = filter_ground_masks(custom_obj_masks,cropped_img,on_ground,self.ground_level,frame)
+                                print("boundingBox: ",boundingBox)
+                                print("type(boundingBox):",type(boundingBox)) 
+                                raise OSError 
 
                     #6. Publish the detection given the object mask 
-                    self.process_custom_detection_results(self,cropped_img,image_data,custom_obj_masks,frame)
+                    self.process_custom_detection_results(custom_obj,image_data,obj_bbs,frame)
 
             except requests.exceptions.RequestException as e:
                 rospy.loginfo("Error detecting custom objects: {}".format(str(e)))
@@ -790,7 +710,7 @@ class ObjectDetectionClient:
         #rospy.loginfo("getting contour points...")
         encoded_image = process_image(image)
         request = {
-            'action': 'generate_masks',
+            'action': 'get_contour_pts',
             'image': encoded_image,
             'detection': detection_center,
             'bounding_box': detection_bounding_box 
@@ -824,8 +744,8 @@ class ObjectDetectionClient:
             rospy.logwarn("Error querying the segment anything server: {}".format(e))
             return None, []
 
-    def process_custom_detection_results(self,obj_name,cropped_img,image_data,masks,frame): 
-        #rospy.loginfo("Processing detection results...")
+    def process_custom_detection_results(self,obj_name,image_data,boundingBoxes,frame): 
+        rospy.loginfo("Processing detection results...")
 
         # Extracting data from the response
         '''
@@ -839,32 +759,31 @@ class ObjectDetectionClient:
         detection_array.header = Header()
         detection_array.header.stamp = image_data['time']
         
-        print("there are {} custom obj masks".format(len(masks)))
-        for i in range(len(masks)):
-            obj_mask = masks[i]
+        for i in range(len(boundingBoxes)): 
+            bbox_i = boundingBoxes[i] #x1,y1,x2,y2 
+            min_x = min([bbox_i[0],bbox_i[2]]); max_x = min([bbox_i[0],bbox_i[2]]) 
+            min_y = min([bbox_i[1],bbox_i[3]]); max_y = max([bbox_i[1],bbox_i[3]])
             detection = ObjectDetection()
             detection.header = detection_array.header
             detection.name = obj_name 
             detection.confidence = float(1.0) 
-            #rospy.loginfo("x: {}, y:{}".format(int((x_coords[i][0] + x_coords[i][1]) / 2), int((y_coords[i][0] + y_coords[i][1]) / 2)))
-            x,y = get_centroid_from_mask(masks[i])
+            x = np.mean([min_x,max_x])
             detection.x = int(x)
+            y = np.mean([min_y,max_y])
             detection.y = int(y) 
-            xmin, ymin, xmax, ymax  = get_bounding_box_from_mask(masks[i])
-            detection.left = int(xmin)
-            detection.lower = int(ymax)
-            detection.right = int(xmax)
-            detection.upper = int(ymin)
+            detection.left = int(min_x)
+            detection.lower = int(max_y)
+            detection.right = int(max_x)
+            detection.upper = int(min_y)
 
-            mask_uint8 = (obj_mask * 255).astype(np.uint8)
-
-            # Find contours in the mask
-            _, contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            largest_contour = max(contours, key=cv2.contourArea)
-            perimeter_px_coords = largest_contour.reshape(-1, 2)
-
-            # Convert NumPy array to a Python list of tuples with native int type
-            contour_pts = [(int(pt[0]), int(pt[1])) for pt in perimeter_px_coords] 
+            # Get mask and contour points
+            '''
+            obj_mask, contour_pts = self.get_contour_pts(image_data['image'][frame], (detection.y, detection.x), (detection.left, detection.lower, detection.right, detection.upper))
+            
+            # Ensure that contour_pts and obj_mask are valid for indexing
+            if obj_mask is None or contour_pts is None:
+                rospy.logwarn("Failed to retrieve valid mask or contour points.")
+                continue
 
             # Check if contour_pts contains floats or invalid types
             for pt in contour_pts:
@@ -872,14 +791,19 @@ class ObjectDetectionClient:
                     rospy.logwarn("Invalid contour point with non-integer values: {}".format(pt))
 
             detection.contour_pts = [Point(x=pt[0], y=pt[1], z=0.0) for pt in contour_pts]
+            ''' 
 
             # Annotate the image
             #rospy.loginfo("Annotating image with detection.")
-            if not os.path.exists("/home/marble/debug_tape_detx"):
-                os.mkdir("/home/marble/debug_tape_detx") 
+            if not os.path.exists("/home/marble/debug_tape_detx/Oct18"):
+                os.mkdir("/home/marble/debug_tape_detx/Oct18") 
 
             try:
-                detection.image = self.annotate_image(obj_mask, cropped_img, "bgr8", path="/home/marble/debug_tape_detx/img_"+str(random.randint(1, 1000))+".jpg") 
+                # Get current date and time
+                current_datetime = datetime.now()
+                # Print the current date and time in a specific format
+                formatted_datetime = current_datetime.strftime("%H-%M-%S")
+                detection.image = self.annotate_image(obj_mask, image_data['image'][frame], "bgr8", path="/home/marble/debug_tape_detx/Oct18/img_"+formatted_datetime+".jpg") 
             except Exception as e:  
                 rospy.logwarn("Error during image annotation: {}".format(e))
 
@@ -936,6 +860,7 @@ class ObjectDetectionClient:
             #rospy.loginfo("Fetching contour points for detection: x={}, y={}".format(detection.x, detection.y))
             
             # Get mask and contour points
+            '''
             obj_mask, contour_pts = self.get_contour_pts(image_data['image'][frame], (detection.y, detection.x), (detection.left, detection.lower, detection.right, detection.upper))
             
             # Ensure that contour_pts and obj_mask are valid for indexing
@@ -949,6 +874,7 @@ class ObjectDetectionClient:
                     rospy.logwarn("Invalid contour point with non-integer values: {}".format(pt))
 
             detection.contour_pts = [Point(x=pt[0], y=pt[1], z=0.0) for pt in contour_pts]
+            ''' 
 
             # Annotate the image
             #rospy.loginfo("Annotating image with detection.")

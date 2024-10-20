@@ -51,8 +51,10 @@
 
     <!-- Object Detection Server URL (External URL For GLIP) -->
     <!-- arg name="object_detection_server_url" default="http://172.206.254.216:5000" /-->
-    <arg name="object_detection_server_url"  default="http://100.109.99.3:5005"/> 
-    <arg name="segment_anything_server_url" default="http://100.109.99.3:5006"/>
+    <arg name="object_detection_server_url"  default="http://128.138.224.174:5005"/> 
+    <arg name="segment_anything_server_url" default="http://128.138.224.174:5006"/>
+    <arg name="qwen_server_url" default="http://128.138.224.174:5007"/>
+
     <!-- Object Detection Server Status -->
     <arg name="object_detector_status_topic" default="object_detector/status" />
     <!-- URL For Robot Server which Interacts with the Explore Loop -->
@@ -145,6 +147,7 @@
         <node pkg="llm_robot_client" type="object_detection_client_node.py" name="object_detection_client" output="screen">
             <param name="object_detection_server_url" value="$(arg object_detection_server_url)" />
             <param name="segment_anything_server_url" value="$(arg segment_anything_server_url)"/>
+            <param name="qwen_server_url" value="$(arg qwen_server_url)"/> 
             <param name="cam_front_topic" value="$(arg cam_front_topic)" />
             <param name="cam_left_topic" value="$(arg cam_left_topic)" />
             <param name="cam_right_topic" value="$(arg cam_right_topic)" />

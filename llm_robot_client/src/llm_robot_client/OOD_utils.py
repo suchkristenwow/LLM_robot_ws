@@ -16,35 +16,27 @@ import pickle
 from rospy import ServiceException
 import rosservice 
 import os 
+import concurrent.futures 
+import matplotlib.pyplot as plt 
 
-def pad_mask(mask, target_shape):
+def draw_filled_box(image, bbox):
     """
-    Pads a binary mask (2D binary array) with False values to fit the target shape.
-
+    Draws a filled black box on the image for the given bounding box coordinates.
+    
     Args:
-        mask (numpy.ndarray): The input binary mask (2D array).
-        target_shape (tuple): The desired shape (height, width) to pad the mask to.
-
+        image (np.ndarray): The image data.
+        bbox (tuple): The bounding box coordinates as (x1, y1, x2, y2).
+    
     Returns:
-        numpy.ndarray: The padded binary mask with False values.
+        np.ndarray: The image with the filled box drawn.
     """
-    # Get the current shape of the mask
-    mask_shape = mask.shape
-
-    # Calculate padding sizes
-    pad_height = max(0, target_shape[0] - mask_shape[0])
-    pad_width = max(0, target_shape[1] - mask_shape[1])
-
-    # Calculate padding for each side (we'll pad equally on all sides)
-    top_pad = pad_height // 2
-    bottom_pad = pad_height - top_pad
-    left_pad = pad_width // 2
-    right_pad = pad_width - left_pad
-
-    # Apply padding using np.pad with constant values of False
-    padded_mask = np.pad(mask, ((top_pad, bottom_pad), (left_pad, right_pad)), mode='constant', constant_values=False)
-
-    return padded_mask
+    # Unpack the bounding box coordinates
+    x1, y1, x2, y2 = bbox
+    
+    # Draw a filled black box on the image (color is black and thickness is -1 for filling)
+    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 0, 0), thickness=-1)
+    
+    return image
 
 def get_object_colors(description):
     prompt = """The user has provided this object description: 
@@ -320,7 +312,61 @@ def find_lowest_center(mask):
     # Find the center X coordinate
     center_x = np.median(x_coords).astype(int)
 
-    return (center_x, max_y) 
+
+def pad_mask(img, mask, target_shape):
+    """
+    Pads a binary mask (2D binary array) with False values to fit the target shape.
+
+    Args:
+        mask (numpy.ndarray): The input binary mask (2D array).
+        target_shape (tuple): The desired shape (height, width) to pad the mask to.
+
+    Returns:
+        numpy.ndarray: The padded binary mask with False values.
+    """
+    def show_anns(anns):
+        if len(anns) == 0:
+            return
+        sorted_anns = sorted(anns, key=(lambda x: x['area']), reverse=True)
+        ax = plt.gca()
+        ax.set_autoscale_on(False)
+
+        img = np.ones((sorted_anns[0]['segmentation'].shape[0], sorted_anns[0]['segmentation'].shape[1], 4))
+        img[:,:,3] = 0
+        for ann in sorted_anns:
+            m = ann['segmentation']
+            color_mask = np.concatenate([np.random.random(3), [0.35]])
+            img[m] = color_mask
+        ax.imshow(img)
+
+    # Get the current shape of the mask
+    if isinstance(mask,dict): 
+        mask_shape = mask['segmentation'].shape
+    else:
+        mask_shape = mask.shape
+
+    # Calculate padding sizes
+    pad_height = max(0, target_shape[0] - mask_shape[0])
+    pad_width = max(0, target_shape[1] - mask_shape[1])
+
+    # Calculate padding for each side (we'll pad equally on all sides)
+    top_pad = pad_height // 2
+    bottom_pad = pad_height - top_pad
+    left_pad = pad_width // 2
+    right_pad = pad_width - left_pad
+
+    # Apply padding using np.pad with constant values of False
+    padded_mask = np.pad(mask, ((top_pad, bottom_pad), (left_pad, right_pad)), mode='constant', constant_values=False)
+
+    plt.figure(figsize=(20,20))
+    plt.imshow(img)
+    show_anns(padded_mask) 
+    plt.axis('off')
+    #plt.show()
+    print("writing: {}".format("/home/marble/padded_mask_fig.jpg"))
+    plt.savefig("/home/marble/padded_mask_fig.jpg") 
+    plt.close() 
+    return padded_mask
 
 def filter_ground_masks(custom_obj_masks,img,on_ground,ground_level,frame,service_name='/H03/project_detections/get_3d_point_from_pixel'): 
     print("filtering ground masks ...")
@@ -333,7 +379,6 @@ def filter_ground_masks(custom_obj_masks,img,on_ground,ground_level,frame,servic
         frame_name = 'cam_left_link' 
     elif 'right' in frame: 
         frame_name = 'cam_right_link' 
-    print("there are {} unfiltered masks".format(len(custom_obj_masks))) 
 
     filtered_masks = []
     if not os.path.exists("/home/marble/filtered_annotated_imgs"):
@@ -378,9 +423,9 @@ def filter_ground_masks(custom_obj_masks,img,on_ground,ground_level,frame,servic
     
     return filtered_masks 
 
-def filter_masks(masks,image_data,obj_name,obj_description,obj_size,image_frame,obj_colors,max_masks_for_consideration): 
+def filter_masks(masks,image_data,obj_name,obj_description,image_frame,obj_colors): 
     print("entering filter masks!!!")
-    print("there are {} masks and we are trying to filter that down to: {}".format(len(masks),max_masks_for_consideration))
+
     '''
     if len(masks) > max_masks_for_consideration: 
         masks = filter_masks_by_size(masks,obj_size,image_frame)
@@ -391,45 +436,55 @@ def filter_masks(masks,image_data,obj_name,obj_description,obj_size,image_frame,
 
     return masks 
 
-def filter_masks_by_color(masks,obj_name,obj_description,image_data,obj_color):
+def filter_single_mask(mask, obj_color, obj_name, obj_description, image_data):
     """
-    Determine which masks have the right color 
+    Helper function to process a single mask and return whether it has the correct color.
+    """
+    h, w, _ = image_data.shape
+    if isinstance(mask, dict):
+        mask_bb = get_bounding_box_from_mask(mask['segmentation'])
+    else:
+        mask_bb = get_bounding_box_from_mask(mask)
+
+    x_min, y_min, x_max, y_max = mask_bb
+    img = copy.deepcopy(image_data)
+    img_with_box = cv2.rectangle(img, (x_min, y_min), (x_max, y_max), (0, 255, 0), thickness=2)
+    img_path = "/home/marble/img_with_box_{}.jpg".format(x_min)  # unique filename for each mask
+    cv2.imwrite(img_path, img_with_box)
+
+    if len(obj_color) == 1:
+        prompt = "Is the object in this bounding box {}? Please include 'yes' or 'no' in your response for parsing.".format(obj_color[0])
+    else:
+        prompt = "Is the object in this bounding box any of the following colors {}? Please include 'yes' or 'no' in your response for parsing.".format(str(obj_color))
+
+    response, _ = generate_with_openai(prompt, image_path=img_path)
+    return 'yes' in response.lower()
+
+def filter_masks_by_color(masks, obj_name, obj_description, image_data, obj_color):
+    """
+    Determine which masks have the right color, using parallelization.
     """
     print("filtering masks by color ...")
-    #print("there are {} masks".format(len(masks))) 
     correct_color_masks = []
-    h,w,_ = image_data.shape 
-    #print("image_data.shape: {},{}".format(h,w))
-    for mask in masks: 
-        #mask = np.reshape(mask,np.array(h,w))
-        if isinstance(mask,dict): 
-            mask_bb = get_bounding_box_from_mask(mask['segmentation'])
-        else: 
-            #print("mask.shape: ",mask.shape)
-            mask_bb = get_bounding_box_from_mask(mask) 
 
-        x_min, y_min, x_max, y_max = mask_bb 
-        #print("mask_bb:",mask_bb)
-        # Draw the bounding box on the image
-        img = copy.deepcopy(image_data)
-        img_with_box = cv2.rectangle(img, (x_min, y_min), (x_max, y_max), (0,255,0), thickness=2)
-        #print("saving the img: ","/home/marble/img_with_box.jpg")
-        cv2.imwrite("/home/marble/img_with_box.jpg",img_with_box) 
-        if len(obj_color) == 1:
-            prompt = "The user described " + obj_name + " like this: " + obj_description + """
-            Is the """ + obj_name + " in the bounding box " + obj_color[0] + "? Please include 'yes' or 'no' in your response for parsing."
-        else: 
-            prompt = "The user described " + obj_name + " like this: " + obj_description + """
-            Is the """ + obj_name + " in the bounding box any of these colors " + str(obj_color) + "? Please include 'yes' or 'no' in your response for parsing."
+    # Use ThreadPoolExecutor for parallel processing
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        # Submit each mask processing to the executor
+        future_to_mask = {
+            executor.submit(filter_single_mask, mask, obj_color, obj_name, obj_description, image_data): mask
+            for mask in masks
+        }
 
-        #print("prompt: ",prompt)
-        response,_ = generate_with_openai(prompt,image_path="/home/marble/img_with_box.jpg") 
-        #print("response: ",response)
+        # Collect results as they complete
+        for future in concurrent.futures.as_completed(future_to_mask):
+            mask = future_to_mask[future]
+            try:
+                if future.result():
+                    correct_color_masks.append(mask)
+            except Exception as exc:
+                print("An exception occurred during mask processing: {}".format(exc))
 
-        if 'yes' in response.lower():
-            correct_color_masks.append(mask) 
-
-    return correct_color_masks     
+    return correct_color_masks
 
 def filter_masks_by_size(masks, obj_size, image_frame, service_name='/H03/project_detections/get_3d_point_from_pixel'):
     print("filtering masks by size ...")

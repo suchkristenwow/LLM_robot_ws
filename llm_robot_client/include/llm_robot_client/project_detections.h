@@ -18,6 +18,7 @@
 #include <rough_octomap/RoughOcTree.h>
 #include <rough_octomap/conversions.h>
 #include <std_msgs/String.h>
+#include <std_msgs/Float32.h> 
 #include <visualization_msgs/Marker.h>
 #include <message_filters/subscriber.h>
 #include <geometry_msgs/TransformStamped.h>
@@ -98,6 +99,7 @@ class ProjectDetections
         void object_detections_callback( const llm_robot_client::ObjectDetectionArray::ConstPtr &msg );
         void cam_info_callback( const sensor_msgs::CameraInfo::ConstPtr &msg);
         void point_cloud_callback(const sensor_msgs::PointCloud2::ConstPtr &msg); 
+        void publish_ground_plane_cloud(); 
 
         //Functions for localization
         cv::Point3d project_cam_xy(std::string &cam_frame, cv::Point2d &center_point);
@@ -137,7 +139,7 @@ class ProjectDetections
         ros::ServiceServer _get_back_of_bbox_service; 
 
         pcl::PointCloud<pcl::PointXYZ>::Ptr _cloud; 
-
+        octomap::RoughOcTree* _tree; 
         octomap_msgs::Octomap _map;
         std::map<std::string, image_geometry::PinholeCameraModel> _cam_models_map;
         int _num_cam_models;
@@ -168,6 +170,7 @@ class ProjectDetections
         ros::Publisher _rivz_pub;
         ros::Publisher _debug_rviz_pub;
         ros::Publisher ground_plane_publisher;   
+        ros::Publisher ground_plane_z_publisher;   
         ros::Publisher marker_pub; 
 
         //TF Listner
